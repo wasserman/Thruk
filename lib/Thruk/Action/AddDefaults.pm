@@ -49,6 +49,8 @@ use constant {
     DISABLED_CONF    => 5,
     HIDDEN_CONF      => 6,
     UP_CONF          => 7,
+
+    HIDDEN_LMD_PARENT => 8,
 };
 
 ######################################
@@ -744,6 +746,9 @@ sub set_configs_stash {
     6 = hidden   (overide by config tool)   HIDDEN_CONF
     7 = up       (overide by config tool)   UP_CONF
 
+   override by LMD clients
+    8 = disabled (overide by lmd)           HIDDEN_LMD_PARENT
+
 =cut
 sub _set_possible_backends {
     my ($c,$disabled_backends) = @_;
@@ -762,6 +767,10 @@ sub _set_possible_backends {
             next;
         }
         my $peer = $c->{'db'}->get_peer_by_key($back);
+        if($peer->{disabled} && $peer->{disabled} == HIDDEN_LMD_PARENT) {
+            $c->{'db'}->disable_backend($back);
+            next;
+        }
         $backend_detail{$back} = {
             'name'       => $peer->{'name'},
             'addr'       => $peer->{'addr'},
@@ -1007,6 +1016,70 @@ sub set_processinfo {
                     }
                 }
                 $c->stats->profile(end => "AddDefaults::set_processinfo fetch shadowed info");
+            }
+
+            my $missing = 0;
+            for my $key (keys %{$processinfo}) {
+                if(!$Thruk::Backend::Pool::peers->{$key}) {
+                    $missing++;
+                }
+            }
+
+            if($ENV{'THRUK_USE_LMD'}) {
+                my $all_sites_info = $c->{'db'}->get_sites(backend => ["ALL"]);
+                my $existing       =  {};
+                next unless $all_sites_info;
+                # add sub federated backends
+                my $changed   = 0;
+                for my $row (@{$all_sites_info}) {
+                    my $key = $row->{'key'};
+                    $existing->{$key} = 1;
+                    if(!$Thruk::Backend::Pool::peers->{$key}) {
+                        my $parent = $Thruk::Backend::Pool::peers->{$row->{'parent'}};
+                        next unless $parent;
+                        my $peer = Thruk::Backend::Peer->new({
+                            name => $row->{'name'},
+                            id   => $key,
+                            type => "livestatus",
+                            section => $row->{'section'} ? $parent->peer_name().'/'.$row->{'section'} : $parent->peer_name(),
+                            options => {
+                                peer => $row->{'addr'},
+                            },
+                        }, $c->config, {});
+                        $peer->{'lmd_fake_backend'} = 1;
+                        $Thruk::Backend::Pool::peers->{$peer->{'key'}} = $peer;
+                        push @{$Thruk::Backend::Pool::peer_order}, $peer->{'key'};
+                        $parent->{'disabled'} = HIDDEN_LMD_PARENT;
+                        $changed++;
+                    }
+                }
+                # remove exceeding backends
+                my $new_order = [];
+                for my $key (@{$Thruk::Backend::Pool::peer_order}) {
+                    my $peer = $Thruk::Backend::Pool::peers->{$key};
+                    if(!$peer->{'lmd_fake_backend'}) {
+                        push @{$new_order}, $key;
+                        next;
+                    }
+                    if(!$existing->{$key}) {
+                        delete $cached_data->{'processinfo'}->{$key};
+                        delete $processinfo->{$key};
+                        delete $Thruk::Backend::Pool::peers->{$key};
+                        $changed++;
+                        next;
+                    }
+                    push @{$new_order}, $key;
+                }
+                if($changed) {
+                    $Thruk::Backend::Pool::peer_order = $new_order;
+                    $c->db->{'initialized'} = 0;
+                    $c->db->init();
+                    # fetch missing processinfo
+                    $processinfo = $c->{'db'}->get_processinfo();
+                    for my $key (keys %{$processinfo}) {
+                        $cached_data->{'processinfo'}->{$key} = $processinfo->{$key};
+                    }
+                }
             }
         }
         $cached_data->{'processinfo_time'} = time();

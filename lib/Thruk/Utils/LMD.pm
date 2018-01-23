@@ -347,6 +347,7 @@ sub _write_lmd_config {
 
     for my $key (@{$Thruk::Backend::Pool::peer_order}) {
         my $peer = $Thruk::Backend::Pool::peers->{$key};
+        next if $peer->{'lmd_fake_backend'};
         $site_config .= "[[Connections]]\n";
         $site_config .= "name   = '".$peer->peer_name()."'\n";
         $site_config .= "id     = '".$key."'\n";
